@@ -17,22 +17,22 @@
 #include <Arduino.h>
 #include <stdint.h>        
 #include <driver/ledc.h>   // Señales PWM
+#include "config.h" // Adafruit io Arduino
 
 /*
 #####################################
 ########### Definir Pines ###########
 #####################################
 */
-#define Sr    18  // Servo motor
+#define Sr    5  // Servo motor
 #define BTN1  14  // Botón temperatura
-#define BTN2   5  // Segundo botón
-#define BTN3  27  // Botón contador
 
-#define LED1  23  // Rojo
-#define LED2  12  // Verde (ojo: GPIO12 es pin de arranque; evitarlo alto en boot)
-#define LED3  15  // Azul
 
-#define St    32  // Sensor de temperatura (ADC)
+#define LED1  15  // Rojo
+#define LED2  2  // Verde (ojo: GPIO12 es pin de arranque; evitarlo alto en boot)
+#define LED3  4  // Azul
+
+#define St    34  // Sensor de temperatura (ADC)
 
 // Servo
 
@@ -42,21 +42,23 @@
 
 // Display
 
-#define D1 16
-#define D2 17 
-#define D3 1
+#define D1 18
+#define D2 19
+#define D3 21
 
 // Patas del Display
 
-#define A   19 
+#define A   13
+#define B   12 
+#define C   14 
+#define D   27 
+#define E   26 
+#define F   25 
+#define G   33
+#define dp  32
 
-#define B   21 
-#define C   22 
-#define D   33 
-#define E   25 
-#define F   26 
-#define G   4 
-#define dp 13 
+// ADC
+#define ADCPIN 35
 
 /*
 ###########################################
@@ -72,6 +74,20 @@ const uint8_t  PWM_RESOLUCION   = 12;     // 12 bits (0..4095)
 const uint16_t PWM_MAX          = 4095;   // Resolución Máxima 4096-1
 
 /*
+###############################################
+############ Variables Globales ADC ###########
+###############################################
+*/
+
+int adcRaw;
+float adcFiltrado;
+
+float adcRawEMA = 0; // Y(0)
+float adcFiltrado = adcRaw; // S(0) = Y(0)
+float alpha = 0.07; // Factor de suavizado (0-1)
+
+
+/*
 ###########################################
 ########### Prototipos/funciones ##########
 ###########################################
@@ -83,6 +99,10 @@ void  semaforo(float tC);
 // Servo motor
 void initPWM(void);
 
+//ADC
+void getADCEMA(void);
+void getADCRAW(void);
+
 /*
 ##########################################
 ########### Programación base ############
@@ -93,8 +113,6 @@ void setup() {
 
   // Botones
   pinMode(BTN1, INPUT_PULLUP);
-  pinMode(BTN2, INPUT_PULLUP);
-  pinMode(BTN3, INPUT_PULLUP);
 
   // Configurar canales PWM y asociar pines
   ledcSetup(CH_LED1, PWM_FRECUENCIA, PWM_RESOLUCION);
@@ -122,6 +140,19 @@ void setup() {
 }
 
 void loop() {
+
+  //ADC
+  getADCRAW();
+  getADCEMA();
+  Serial.print('ADCRAW: ');
+  Serial.println(adcRaw);
+  Serial.print(', ADC_FIltrado:');
+  Serial.println(adcFiltrado);
+
+  delay(10);
+  
+
+  //Temperatura
   float tC = temperatura(St);
 
   // Mostrar temperatura al presionar BTN1 
@@ -189,7 +220,15 @@ void initPWM(void) {
   ledcWrite(pwmChannel, 4);
 }
 
+void getADCRAW(void){
+  adcRaw=analogRead(ADCPIN);
+}
 
+void getADCEMA(void){
+  
+  adcRaw = analogRead(ADCPIN);
+  adcFiltrado = (alpha * adcRawEMA) + ((1.0 -alpha ) * adcFiltrado);
+}
 
 
 
