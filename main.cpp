@@ -18,6 +18,7 @@
 #include <stdint.h>        
 #include <driver/ledc.h>   // Señales PWM
 #include "config.h" // Adafruit io Arduino
+#include <AdafruitIO.h>
 
 /*
 #####################################
@@ -74,9 +75,9 @@ const uint8_t  PWM_RESOLUCION   = 12;     // 12 bits (0..4095)
 const uint16_t PWM_MAX          = 4095;   // Resolución Máxima 4096-1
 
 /*
-###############################################
-############ Variables Globales ADC ###########
-###############################################
+######################################
+############ Variables ADC ###########
+######################################
 */
 
 int adcRaw;
@@ -85,6 +86,20 @@ float adcFiltrado;
 float adcRawEMA = 0; // Y(0)
 float adcFiltrado = adcRaw; // S(0) = Y(0)
 float alpha = 0.07; // Factor de suavizado (0-1)
+
+/*
+#################################################
+############ Variables IO modulo Wifi ###########
+#################################################
+
+Adafruit IO */
+
+#define IO_LOOP_DELAY 5000
+unsigned long lastUpdate = 0;
+
+// set up the 'counter' feed
+AdafruitIO_Feed *canalTemperatura = io.feed("temperatura");
+
 
 
 /*
@@ -135,7 +150,38 @@ void setup() {
   // Servo motor
   initPWM();
 
-  
+  //adafruit IO
+
+  // wait for serial monitor to open
+  while(! Serial);
+
+  Serial.print("Connecting to Adafruit IO");
+
+  // connect to io.adafruit.com
+  io.connect();
+
+  // set up a message handler for the count feed.
+  // the handleMessage function (defined below)
+  // will be called whenever a message is
+  // received from adafruit io.
+  //counter->onMessage(handleMessage);
+
+  // wait for a connection
+  while(io.status() < AIO_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+
+  // we are connected
+  Serial.println();
+  Serial.println(io.statusText());
+  //counter->get();
+
+
+
+
+
+
   
 }
 
@@ -166,6 +212,24 @@ void loop() {
     semaforo(tC);
 
   }
+
+  // IO
+   // io.run(); is required for all sketches.
+  // it should always be present at the top of your loop
+  // function. it keeps the client connected to
+  // io.adafruit.com, and processes any incoming data.
+  io.run();
+
+  if (millis() > (lastUpdate + IO_LOOP_DELAY)) {
+    // save count to the 'counter' feed on Adafruit IO
+    Serial.print("sending -> ");
+    Serial.println(tC);
+    canalTemperatura->save(tC);
+
+    // after publishing, store the current time
+    lastUpdate = millis();
+  }
+
 
   
 }
