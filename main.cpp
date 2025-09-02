@@ -1,23 +1,13 @@
-//******************************************/
-// Universidad del Valle de Guatemala
-// BE3029 - Electronica Digital 2
-// Pablo Mazariegos
-// 12/08/2025
-// Proyecto 1
-// MCU: ESP32 dev kit 1.0
-//******************************************/
-
-
 /*
 #################################
 ########### Librerías ###########
 #################################
 */
-
 #include <Arduino.h>
-#include <stdint.h>        
-#include <driver/ledc.h>   // Señales PWM
-#include "config.h" // Adafruit io Arduino
+#include <stdint.h>
+#include <driver/ledc.h>
+#include <math.h>
+#include "config.h"      // Debe definir el objeto global 'io' de Adafruit IO
 #include <AdafruitIO.h>
 
 /*
@@ -25,98 +15,93 @@
 ########### Definir Pines ###########
 #####################################
 */
-#define Sr    5  // Servo motor
-#define BTN1  14  // Botón temperatura
+#define Sr    5    // Servo motor (LEDC)
+#define BTN1  23   // Botón
 
+#define LEDR  4    // Rojo (PWM)
+#define LEDV  2    // Verde (PWM)
+#define LEDA  15   // Azul  (PWM)
 
-#define LED1  15  // Rojo
-#define LED2  2  // Verde (ojo: GPIO12 es pin de arranque; evitarlo alto en boot)
-#define LED3  4  // Azul
-
-#define St    34  // Sensor de temperatura (ADC)
-
-// Servo
-
-#define pwmChannel 4   
-#define freqPWM 50     
-#define resPWM 12   
-
-// Display
-
-#define D1 18
-#define D2 19
-#define D3 21
-
-// Patas del Display
-
-#define A   13
-#define B   12 
-#define C   14 
-#define D   27 
-#define E   26 
-#define F   25 
-#define G   33
-#define dp  32
-
-// ADC
-#define ADCPIN 35
+// Sensor de temperatura (ADC) - LM35
+#define LM35PIN 34
+#define ADCPIN  35
+#define TEMP_PIN LM35PIN     // Cambia a ADCPIN si usas GPIO35
 
 /*
 ###########################################
 ########### PWM (LEDC) parámetros #########
 ###########################################
 */
-#define CH_LED1  0
-#define CH_LED2  1
-#define CH_LED3  2
+#define CH_LEDR  0
+#define CH_LEDV  1
+#define CH_LEDA  2
+#define CH_SERVO 3
 
-const uint32_t PWM_FRECUENCIA   = 5000;   // 5 kHz 
-const uint8_t  PWM_RESOLUCION   = 12;     // 12 bits (0..4095)
-const uint16_t PWM_MAX          = 4095;   // Resolución Máxima 4096-1
+const uint32_t PWM_FRECUENCIA_LED = 5000; // 5 kHz para LEDs
+const uint8_t  PWM_RESOLUCION     = 12;   // 12 bits
+const uint16_t PWM_MAX            = 4095; // 0..4095
+
+// Servo
+#define FREQ_SERVO 50     // 50 Hz (20 ms)
+#define RES_SERVO  12     // 12 bits
+
+// Duty para servo aprox. (50 Hz, 12 bits)
+#define SERVO_IZQ  102    // ~0.5 ms  (extremo izquierdo)
+#define SERVO_CEN  307    // ~1.5 ms  (centro)
+#define SERVO_DER  512    // ~2.5 ms  (extremo derecho)
 
 /*
-######################################
-############ Variables ADC ###########
-######################################
+#################################################
+############ Variables IO módulo Wifi ###########
+#################################################
 */
-
-int adcRaw;
-float adcFiltrado;
-
-float adcRawEMA = 0; // Y(0)
-float adcFiltrado = adcRaw; // S(0) = Y(0)
-float alpha = 0.07; // Factor de suavizado (0-1)
-
-/*
-#################################################
-############ Variables IO modulo Wifi ###########
-#################################################
-
-Adafruit IO */
-
-#define IO_LOOP_DELAY 5000
+#define IO_LOOP_DELAY 5000UL
 unsigned long lastUpdate = 0;
-
-// set up the 'counter' feed
 AdafruitIO_Feed *canalTemperatura = io.feed("temperatura");
 
+/*
+#####################################
+########### Prototipos  #############
+#####################################
+*/
+void initButton();
+void IRAM_ATTR BTN1_ISR();
 
+float leerTemperaturaC_estable();
+void  semaforoYServo(float tC);
 
 /*
-###########################################
-########### Prototipos/funciones ##########
-###########################################
+#####################################
+############ Variables  #############
+#####################################
 */
+// Botón
+volatile bool btn1ON = false;
+volatile uint32_t lastISRbtn1 = 0;
+const uint32_t antiBounce = 200; // ms
 
-float temperatura(int pin);
-void  semaforo(float tC);
+// ===== Calibración y filtros =====
+const float ADC_VREF      = 5.5f;    // Vref efectivo con atenuación (ajústalo a tu hardware)
+const float TEMP_Kv       = 100.0f;  // 10 mV/°C => V*100 = °C
+const float TEMP_OFFSET_C = 12.0f;   // offset opcional (ajústalo si quieres)
 
-// Servo motor
-void initPWM(void);
+// Multimuestreo + EMA
+const int   N_SAMPLES = 16;
+const int   TRIM_K    = 2;
+const float ALPHA     = 0.15f;        // EMA
+static bool  emaInit  = false;
+static float emaTemp  = 0.0f;
 
-//ADC
-void getADCEMA(void);
-void getADCRAW(void);
+// Umbrales y histeresis (°C)
+const float T_LOW  = 25.0f;   // límite entre BAJA y MEDIA
+const float T_HIGH = 27.0f;   // límite entre MEDIA y ALTA
+const float HYST   = 0.3f;    // banda muerta
+
+enum Zona { Z_BAJA, Z_MEDIA, Z_ALTA };
+static Zona zonaActual = Z_MEDIA;
+
+// Última lectura para logs
+float tC_last = 0.0f;
 
 /*
 ##########################################
@@ -125,113 +110,64 @@ void getADCRAW(void);
 */
 void setup() {
   Serial.begin(115200);
+  initButton();
 
-  // Botones
-  pinMode(BTN1, INPUT_PULLUP);
+  // LEDs por PWM
+  ledcSetup(CH_LEDR, PWM_FRECUENCIA_LED, PWM_RESOLUCION);
+  ledcSetup(CH_LEDV, PWM_FRECUENCIA_LED, PWM_RESOLUCION);
+  ledcSetup(CH_LEDA, PWM_FRECUENCIA_LED, PWM_RESOLUCION);
+  ledcAttachPin(LEDR, CH_LEDR);  // ROJO -> GPIO4
+  ledcAttachPin(LEDV, CH_LEDV);  // VERDE -> GPIO2
+  ledcAttachPin(LEDA, CH_LEDA);  // AZUL  -> GPIO15
+  ledcWrite(CH_LEDR, 0);
+  ledcWrite(CH_LEDV, 0);
+  ledcWrite(CH_LEDA, 0);
 
-  // Configurar canales PWM y asociar pines
-  ledcSetup(CH_LED1, PWM_FRECUENCIA, PWM_RESOLUCION);
-  ledcSetup(CH_LED2, PWM_FRECUENCIA, PWM_RESOLUCION);
-  ledcSetup(CH_LED3, PWM_FRECUENCIA, PWM_RESOLUCION);
+  // ADC
+  analogReadResolution(12);                 // 0..4095
+  analogSetPinAttenuation(TEMP_PIN, ADC_11db);
 
-  ledcAttachPin(LED1, CH_LED1);
-  ledcAttachPin(LED2, CH_LED2);
-  ledcAttachPin(LED3, CH_LED3);
+  // Servo
+  ledcSetup(CH_SERVO, FREQ_SERVO, RES_SERVO);
+  ledcAttachPin(Sr, CH_SERVO);
+  ledcWrite(CH_SERVO, SERVO_CEN);
 
-  // Entrada analógica (ESP32)
-  analogReadResolution(12);               // 0–4095
-  analogSetPinAttenuation(St, ADC_11db);  // ~0–3.6 V
-
-  // Apagar LEDs al inicio
-  ledcWrite(CH_LED1, 0);
-  ledcWrite(CH_LED2, 0);
-  ledcWrite(CH_LED3, 0);
-
-  // Servo motor
-  initPWM();
-
-  //adafruit IO
-
-  // wait for serial monitor to open
-  while(! Serial);
-
+  // Adafruit IO
+  while (!Serial) { delay(10); }
   Serial.print("Connecting to Adafruit IO");
-
-  // connect to io.adafruit.com
   io.connect();
-
-  // set up a message handler for the count feed.
-  // the handleMessage function (defined below)
-  // will be called whenever a message is
-  // received from adafruit io.
-  //counter->onMessage(handleMessage);
-
-  // wait for a connection
-  while(io.status() < AIO_CONNECTED) {
+  while (io.status() < AIO_CONNECTED) {
     Serial.print(".");
     delay(500);
   }
-
-  // we are connected
   Serial.println();
   Serial.println(io.statusText());
-  //counter->get();
-
-
-
-
-
-
-  
 }
 
 void loop() {
-
-  //ADC
-  getADCRAW();
-  getADCEMA();
-  Serial.print('ADCRAW: ');
-  Serial.println(adcRaw);
-  Serial.print(', ADC_FIltrado:');
-  Serial.println(adcFiltrado);
-
-  delay(10);
-  
-
-  //Temperatura
-  float tC = temperatura(St);
-
-  // Mostrar temperatura al presionar BTN1 
-  if (digitalRead(BTN1) == LOW) {
-    Serial.print("Temperatura: ");
-    Serial.print(tC, 2);
-    Serial.println(" °C");
-    delay(250); // anti-rebote 
-
-    // Semáforo por temperatura (PWM)
-    semaforo(tC);
-
-  }
-
-  // IO
-   // io.run(); is required for all sketches.
-  // it should always be present at the top of your loop
-  // function. it keeps the client connected to
-  // io.adafruit.com, and processes any incoming data.
   io.run();
 
-  if (millis() > (lastUpdate + IO_LOOP_DELAY)) {
-    // save count to the 'counter' feed on Adafruit IO
-    Serial.print("sending -> ");
-    Serial.println(tC);
-    canalTemperatura->save(tC);
+  // Leer temp (multimuestreo + EMA), limitar a 0..99.9
+  tC_last = leerTemperaturaC_estable();
 
-    // after publishing, store the current time
-    lastUpdate = millis();
+  // Acciones del botón
+  if (btn1ON) {
+    btn1ON = false;
+
+    Serial.print("Temperatura (est): ");
+    Serial.print(tC_last, 1);
+    Serial.println(" °C");
+
+    semaforoYServo(tC_last);
+
+    canalTemperatura->save(tC_last);
   }
 
-
-  
+  // Telemetría periódica
+  if (millis() - lastUpdate > IO_LOOP_DELAY) {
+    canalTemperatura->save(tC_last);
+    lastUpdate = millis();
+  }
 }
 
 /*
@@ -239,73 +175,105 @@ void loop() {
 ########### Programación Funciones ############
 ###############################################
 */
-
-// Conversor de temperatura 
-float temperatura(int pin) {
-  int lectura = analogRead(pin); // Leer el sensor de temperatura 
-  float tempC = map(lectura, 0, 4095, 0, 125); // Convertir a temperatura
-  return tempC;
+void initButton() {
+  pinMode(BTN1, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BTN1), BTN1_ISR, FALLING);
 }
 
-// Semáforo
-void semaforo(float p) {
-  // Por defecto todas las LEDS apagadas
-  uint16_t dutyR = 0, dutyV = 0, dutyA = 0;
+void IRAM_ATTR BTN1_ISR() {
+  uint32_t t = millis();
+  if (t - lastISRbtn1 > antiBounce) {
+    btn1ON = true;
+    lastISRbtn1 = t;
+  }
+}
 
-  if (p < 45.0f) {
-    dutyR = PWM_MAX;      // Rojo endencido
-    // Servo -90
-    ledcWrite(pwmChannel, 205);
-    
+/* ========= Lectura estable del LM35 ========= */
+float leerTemperaturaC_estable() {
+  (void)analogRead(TEMP_PIN);  // dummy read para estabilizar
 
-  } else if (p <= 76.0f) {
-    dutyV = PWM_MAX;      // Verde encendido
-    // Servo 0
-    ledcWrite(pwmChannel, 307);
-    
-  
-
-  } else {
-    dutyA = PWM_MAX;      // Azul encendido
-    // Servo 90
-    ledcWrite(pwmChannel, 410);
-  
+  int v[N_SAMPLES];
+  for (int i = 0; i < N_SAMPLES; ++i) {
+    v[i] = analogRead(TEMP_PIN);
+    delayMicroseconds(500);
   }
 
-  // Enviar PWMs
-  ledcWrite(CH_LED1, dutyR);
-  ledcWrite(CH_LED2, dutyV);
-  ledcWrite(CH_LED3, dutyA);
+  int min1 = 4096, min2 = 4096, max1 = -1, max2 = -1;
+  long sum = 0;
+  for (int i = 0; i < N_SAMPLES; ++i) {
+    int x = v[i];
+    sum += x;
+    if (x <= min1) { min2 = min1; min1 = x; }
+    else if (x < min2) { min2 = x; }
+    if (x >= max1) { max2 = max1; max1 = x; }
+    else if (x > max2) { max2 = x; }
+  }
+
+  long trimmedSum = sum - min1 - min2 - max1 - max2;
+  int trimmedN = N_SAMPLES - 2*TRIM_K;
+  if (trimmedN < 1) {
+    trimmedSum = sum;
+    trimmedN   = N_SAMPLES;
+  }
+
+  float adcMean = (float)trimmedSum / (float)trimmedN;
+
+  // ADC -> Volt -> °C (LM35: 10 mV/°C) + offset
+  float volt  = adcMean * (ADC_VREF / 4095.0f);
+  float tempC = volt * TEMP_Kv + TEMP_OFFSET_C;
+
+  // EMA (filtro paso-bajo)
+  if (!emaInit) { emaTemp = tempC; emaInit = true; }
+  else          { emaTemp = ALPHA * tempC + (1.0f - ALPHA) * emaTemp; }
+
+  if (emaTemp < 0)     emaTemp = 0;
+  if (emaTemp > 99.9f) emaTemp = 99.9f;
+
+  return emaTemp;
 }
 
-void initPWM(void) {
-  ledcSetup(pwmChannel, freqPWM, resPWM);
-  ledcAttachPin(Sr, pwmChannel);
-  ledcWrite(pwmChannel, 4);
+/* ====== Semáforo + servo con histeresis ====== */
+void semaforoYServo(float tC) {
+  Zona nueva = zonaActual;
+
+  switch (zonaActual) {
+    case Z_BAJA:
+      // Sube a MEDIA cuando pase T_LOW + HYST
+      if (tC >= T_LOW + HYST) nueva = Z_MEDIA;
+      break;
+
+    case Z_MEDIA:
+      // Baja a BAJA cuando caiga por debajo de T_LOW - HYST
+      if (tC < T_LOW - HYST) nueva = Z_BAJA;
+      // Sube a ALTA cuando pase T_HIGH + HYST
+      else if (tC >= T_HIGH + HYST) nueva = Z_ALTA;
+      break;
+
+    case Z_ALTA:
+      // Baja a MEDIA cuando caiga por debajo de T_HIGH - HYST
+      if (tC < T_HIGH - HYST) nueva = Z_MEDIA;
+      break;
+  }
+
+  zonaActual = nueva;
+
+  // LEDs: LEDR=rojo (GPIO4), LEDV=verde (GPIO2), LEDA=azul (GPIO15)
+  uint16_t dutyR = 0, dutyV = 0, dutyA = 0;
+  uint16_t servoDuty = SERVO_CEN;
+
+  if (zonaActual == Z_BAJA) {         // t < 25
+    dutyA = PWM_MAX;                  // AZUL encendido
+    servoDuty = SERVO_DER;            // opcional: posición "frío"
+  } else if (zonaActual == Z_MEDIA) { // 25 ≤ t < 27
+    dutyV = PWM_MAX;                  // VERDE encendido
+    servoDuty = SERVO_CEN;
+  } else {                            // t ≥ 27
+    dutyR = PWM_MAX;                  // ROJO encendido
+    servoDuty = SERVO_IZQ;            // opcional: "caliente"
+  }
+
+  ledcWrite(CH_LEDR, dutyR);
+  ledcWrite(CH_LEDV, dutyV);
+  ledcWrite(CH_LEDA, dutyA);
+  ledcWrite(CH_SERVO, servoDuty);
 }
-
-void getADCRAW(void){
-  adcRaw=analogRead(ADCPIN);
-}
-
-void getADCEMA(void){
-  
-  adcRaw = analogRead(ADCPIN);
-  adcFiltrado = (alpha * adcRawEMA) + ((1.0 -alpha ) * adcFiltrado);
-}
-
-
-
-//########################################################################
-
-
-   
-
-
-
-
-
-
-
-
-
